@@ -13,7 +13,7 @@ import numpy as np
 # disable fileuploader deprecation warn
 st.set_option('deprecation.showfileUploaderEncoding', False)
 
-# remove padding on left 
+# remove padding on left
 st.beta_set_page_config(layout='wide')
 
 cmap_dict = {'Greys' : bokeh.palettes.grey(256),
@@ -24,22 +24,45 @@ cmap_dict = {'Greys' : bokeh.palettes.grey(256),
              'Viridis' : bokeh.palettes.viridis(256),
              'Turbo' : bokeh.palettes.turbo(256)}
 
-def bokeh_imshow(img, height=800, cmap=None):
+def bokeh_imshow(img, overlay=None, height=800, cmap=None, overlay_solid=False):
 
     '''plot image array with bokeh'''
 
-    # dims and color
+    # dims
     n, m = img.shape
-    c = bokeh.models.LinearColorMapper(cmap_dict[cmap])
 
     # keep aspect
     width = int(m/n * height)
     p = figure(plot_height=height, plot_width=width,
                x_range=[0, m], y_range=[0, n])
-    p.image([np.flipud(img)], x=0, y=0, dw=m, dh=n, color_mapper=c)
-
     # wheel zoom on
     p.toolbar.active_scroll = p.select_one(WheelZoomTool)
+    p.xgrid.visible = False
+    p.ygrid.visible = False
+
+    if overlay is not None:
+        # change 0 to na in overlay, then transparency
+        overlay = overlay.astype('float')
+        overlay[overlay == 0] = np.nan
+        p.image([np.flipud(img)], x=0, y=0, dw=m, dh=n, color_mapper=bokeh.models.LinearColorMapper(bokeh.palettes.grey(256)),
+                global_alpha=0.5)
+
+        if overlay_solid:
+            overlay[overlay > 0] = 1
+            r = p.image([np.flipud(overlay)], x=0, y=0, dw=m, dh=n, palette=['#00ff00'])
+
+        # unique labels
+        else:
+            r = p.image([np.flipud(overlay)], x=0, y=0, dw=m, dh=n, color_mapper=bokeh.models.LinearColorMapper(cmap_dict['Turbo']))
+
+        # set 0 transparent
+        r.glyph.color_mapper.nan_color = (0, 0, 0, 0)
+
+    # no overlay
+    else:
+        c = bokeh.models.LinearColorMapper(cmap_dict[cmap])
+        p.image([np.flipud(img)], x=0, y=0, dw=m, dh=n, color_mapper=c)
+
 
     return p
 
@@ -65,13 +88,12 @@ def filter_img(img, median, gauss, chambolle):
     if chambolle > 0:
         img = skimage.restoration.denoise_tv_chambolle(img, weight=chambolle)
 
-    # [0, 1] to [0, 255]
-    if img.max() <= 1.0:
-        img_min = img.min()
-        img_max = img.max()
+    # scale to [0, 255]
+    img_min = img.min()
+    img_max = img.max()
 
-        x_std = (img - img_min) / (img_max - img_min)
-        img = x_std * (255 - 0) + 0
+    x_std = (img - img_min) / (img_max - img_min)
+    img = x_std * 255
 
     return img
 
@@ -80,7 +102,7 @@ def img_hist(img, height, thresh=None):
 
     '''plot histogram of image intensity values'''
 
-    img_arr = img.flatten() 
+    img_arr = img.flatten()
 
     # freedman-diaconis to select n bins
     #q75, q25 = np.percentile(img_arr, [75, 25])
@@ -118,16 +140,21 @@ def segment(img, thresh, border, area_bounds, ecc_bounds):
 
     # cutoff on cell size
     # and eccentricity (how circular, 0 = perfect circle, 1 = ellipse)
-    props = skimage.measure.regionprops(img_thresh) 
-    areas = [prop.area for prop in props]
-    print(areas)
+    # avoids overlapping cells
+    props = skimage.measure.regionprops(img_thresh)
+    saved_segments = np.zeros_like(img_thresh)
+    for prop in props:
+        if prop.area >= area_bounds[0] \
+        and prop.area <= area_bounds[1] \
+        and prop.eccentricity >= ecc_bounds[0] \
+        and prop.eccentricity <= ecc_bounds[1]:
+            saved_segments += img_thresh == prop.label
 
-    
+    # # second round label with filtered segments
+    img_thresh = skimage.measure.label(saved_segments > 0)
+    saved_props = skimage.measure.regionprops(img_thresh)
 
-    import matplotlib.pyplot as plt
-
-    plt.imshow(img_thresh)
-    st.pyplot()
+    return img_thresh, saved_props
 
 
 
@@ -146,8 +173,8 @@ thresh_method = st.sidebar.radio('Method', ['Manual', 'Otsu'])
 if thresh_method == 'Manual':
     thresh = st.sidebar.slider('Pixel threshold', min_value=0, max_value=256, value=0, step=1)
 border = st.sidebar.slider('Border pixel buffer', min_value=0, max_value=10, value=0, step=1)
-area = st.sidebar.slider('Area bounds', min_value=0, max_value=100, value=(0, 100), step=1)
-ecc = st.sidebar.slider('Eccentricity bounds', min_value=0.0, max_value=1.0, value=(0.8, 1.0), step=0.1)
+area = st.sidebar.slider('Area bounds', min_value=0, max_value=2000, value=(0, 2000), step=50)
+ecc = st.sidebar.slider('Eccentricity bounds', min_value=0.0, max_value=1.0, value=(0.0, 1.0), step=0.1)
 
 
 st.sidebar.markdown('## Mask overlay')
@@ -165,21 +192,36 @@ if img_f is not None:
 
     # filter
     img = filter_img(img, median, gauss, chambolle)
-    p = bokeh_imshow(img, height, cmap)
-    st.bokeh_chart(p)
-    st.text('')
 
     # otsu on filtered image
     if thresh_method == 'Otsu':
         thresh = skimage.filters.threshold_otsu(img)
 
-    # get mask for cells
+    # segment
+    img_thresh, props = segment(img, thresh, border, area, ecc)
+
+    if mask == 'None':
+        p = bokeh_imshow(img, height=height, cmap=cmap)
+    elif mask == 'Unique':
+        p = bokeh_imshow(img, img_thresh, height=height)
+    elif mask == 'Full':
+        p = bokeh_imshow(img, img_thresh, height=height, overlay_solid=True)
+    st.bokeh_chart(p)
+    st.text('')
 
     # plot intensity hist
-    p2 = img_hist(img, height, thresh)
-    st.bokeh_chart(p2)
-    
-    segment(img, thresh, border, area, ecc)
+    if thresh:
+        p2 = img_hist(img, height, thresh)
+        st.bokeh_chart(p2)
+
+        count = len(props)
+        avg_area = np.round(np.mean([prop.area for prop in props]), 2)
+        avg_ecc = np.round(np.mean([prop.eccentricity for prop in props]), 2)
+        st.write('Colonies:', count)
+        st.write('Average area:', avg_area)
+        st.write('Average eccentricity:', avg_ecc)
+
+
 
 
 
