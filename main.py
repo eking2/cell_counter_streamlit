@@ -9,12 +9,13 @@ import skimage.io
 import skimage.restoration
 import skimage.segmentation
 import numpy as np
+import io
 
 # disable fileuploader deprecation warn
 st.set_option('deprecation.showfileUploaderEncoding', False)
 
 # remove padding on left
-st.beta_set_page_config(layout='wide')
+st.set_page_config(layout='wide')
 
 cmap_dict = {'Greys' : bokeh.palettes.grey(256),
              'Inferno'  : bokeh.palettes.inferno(256),
@@ -183,10 +184,15 @@ mask = st.sidebar.radio('Segments', ['None', 'Unique', 'Full'])
 # load image
 st.title('Cell counter')
 img_f = st.file_uploader('Input image', type=['jpg', 'tif', 'png'])
+
+#https://discuss.streamlit.io/t/file-uploader-i-o-operation-on-closed-file/6559
 if img_f is not None:
+    img_f.seek(0)
+    buf = img_f.read()
+    buf = io.BytesIO(buf)
 
     # convert rgb to grey
-    img = skimage.io.imread(img_f)
+    img = skimage.io.imread(buf)
     if img.ndim >= 3:
         img = rgb2gray(img)
 
